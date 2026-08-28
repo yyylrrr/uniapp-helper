@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 48" width="36" height="48">
+  <defs>
+    <linearGradient id="gPinGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+  </defs>
+  <path d="M18 2 C9.16 2 2 9.16 2 18 C2 29 18 46 18 46 C18 46 34 29 34 18 C34 9.16 26.84 2 18 2 Z" fill="url(#gPinGrad)"/>
+  <circle cx="18" cy="18" r="7" fill="#ffffff"/>
+  <circle cx="18" cy="18" r="4" fill="#6366f1"/>
+</svg>

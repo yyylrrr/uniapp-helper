@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <defs>
+    <linearGradient id="gMetro" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+  </defs>
+  <circle cx="24" cy="24" r="22" fill="url(#gMetro)"/>
+  <circle cx="24" cy="24" r="20" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.6"/>
+  <path d="M15 14 L33 14 C35 14 36 15.5 36 17 L36 30 C36 32 34.5 33 33 33 L31 36 L29 33 L19 33 L17 36 L15 33 C13.5 33 12 32 12 30 L12 17 C12 15.5 13 14 15 14 Z" fill="#ffffff"/>
+  <rect x="15" y="17" width="18" height="7" rx="1.5" fill="#047857"/>
+  <circle cx="17" cy="28" r="2" fill="#047857"/>
+  <circle cx="31" cy="28" r="2" fill="#047857"/>
+</svg>

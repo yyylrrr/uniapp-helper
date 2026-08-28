@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <defs>
+    <linearGradient id="gCam" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <circle cx="24" cy="24" r="22" fill="url(#gCam)"/>
+  <circle cx="24" cy="24" r="20" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.6"/>
+  <path d="M14 19 C14 17.5 15.5 16 17 16 L20 16 L22 13 L26 13 L28 16 L31 16 C32.5 16 34 17.5 34 19 L34 31 C34 32.5 32.5 34 31 34 L17 34 C15.5 34 14 32.5 14 31 Z" fill="#ffffff"/>
+  <circle cx="24" cy="25" r="5" fill="#1d4ed8"/>
+  <circle cx="24" cy="25" r="3" fill="#ffffff"/>
+</svg>

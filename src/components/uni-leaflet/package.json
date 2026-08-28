@@ -1,0 +1,44 @@
+{
+  "name": "uni-leaflet",
+  "version": "1.0.0",
+  "description": "Cross-platform Leaflet and Native Canvas 2D Map Component for Uni-App (Vue 3, H5, WeChat Mini-Program, App)",
+  "main": "index.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "jikekaifa@qq.com",
+  "license": "MIT",
+  "homepage": "https://jike.dev/posts/uni-leaflet-doc",
+  "keywords": [
+    "uni-app",
+    "leaflet",
+    "map",
+    "canvas",
+    "canvas-2d",
+    "wechat-miniprogram",
+    "wechat",
+    "h5",
+    "gis",
+    "tianditu",
+    "gaode",
+    "vue3",
+    "typescript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yyylrrr/uniapp-helper/tree/main/src/components/uni-leaflet"
+  },
+  "peerDependencies": {
+    "leaflet": "^1.9.4",
+    "vue": "^3.0.0"
+  },
+  "uni_modules": {
+    "scripts": {},
+    "dcloudext": {
+      "category": [
+        "前端组件",
+        "地图组件"
+      ]
+    }
+  }
+}

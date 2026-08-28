@@ -1,6 +1,6 @@
 {
   "name": "uni-leaflet",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Cross-platform Leaflet and Native Canvas 2D Map Component for Uni-App (Vue 3, H5, WeChat Mini-Program, App)",
   "main": "index.ts",
   "scripts": {

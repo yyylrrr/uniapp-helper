@@ -36,15 +36,22 @@
         :max-zoom="18"
         :layers="activeLayers"
         :markers="showMarkers ? filteredMarkers : []"
-        :polylines="showPolylines ? samplePolylines : []"
+        :polylines="activePolylines"
         :polygons="showPolygons ? samplePolygons : []"
         :circles="showCircles ? sampleCircles : []"
+        :enable-cluster="enableCluster"
+        :cluster-radius="clusterRadius"
+        :cluster-max-zoom="17"
+        :geojson="showGeoJson ? sampleGeoJson : null"
+        :geojson-style="currentGeoJsonStyle"
         height="100%"
         @ready="onMapReady"
         @click="onMapClick"
         @move="onMapMove"
         @zoom="onMapZoom"
         @overlay-click="onOverlayClick"
+        @cluster-click="onClusterClick"
+        @geojson-click="onGeoJsonClick"
       />
     </view>
 
@@ -140,7 +147,7 @@
 
     <!-- Vector Overlays Toggle Panel -->
     <view class="panel-card">
-      <view class="section-title">点、线、面、图标与 Label 标注开关</view>
+      <view class="section-title">点、线、面要素选择展示与自适应视野 (fitBounds)</view>
       <view class="overlay-toggles-grid">
         <view
           class="toggle-btn"
@@ -156,7 +163,7 @@
           @click="showPolylines = !showPolylines"
         >
           <text class="toggle-icon">🛣️</text>
-          <text class="toggle-text">路线/折线 ({{ samplePolylines.length }})</text>
+          <text class="toggle-text">路线/折线 ({{ activePolylines.length }})</text>
         </view>
         <view
           class="toggle-btn"
@@ -175,6 +182,29 @@
           <text class="toggle-text">辐射圆形 ({{ sampleCircles.length }})</text>
         </view>
       </view>
+
+      <!-- Quick Preset Selection: 点 / 线 / 面 -->
+      <view class="preset-mode-row" style="margin-top: 14rpx;">
+        <view class="preset-chip" hover-class="btn-hover" @click="selectOnlyAndFit('markers')">
+          <text class="chip-text">📍 仅选【点】并包裹</text>
+        </view>
+        <view class="preset-chip" hover-class="btn-hover" @click="selectOnlyAndFit('polylines')">
+          <text class="chip-text">🛣️ 仅选【线】并包裹</text>
+        </view>
+        <view class="preset-chip" hover-class="btn-hover" @click="selectOnlyAndFit('polygons')">
+          <text class="chip-text">🟦 仅选【面】并包裹</text>
+        </view>
+        <view class="preset-chip primary" hover-class="btn-hover" @click="selectOnlyAndFit('all')">
+          <text class="chip-text">🌈 全选点线面并包裹</text>
+        </view>
+      </view>
+
+      <view style="margin-top: 14rpx;">
+        <view class="action-btn fit-btn full-width" hover-class="btn-hover" @click="fitCurrentlySelectedOverlays">
+          <text class="action-btn-icon">🎯</text>
+          <text class="action-btn-text">视野自适应包裹当前勾选要素 (fitBounds)</text>
+        </view>
+      </view>
     </view>
 
     <!-- Icon Type Filter Panel -->
@@ -191,6 +221,202 @@
           <text class="tab-icon">{{ tab.icon }}</text>
           <text class="tab-label">{{ tab.name }}</text>
           <text class="tab-count">({{ getIconCount(tab.type) }})</text>
+        </view>
+      </view>
+    </view>
+
+    <!-- Marker Clustering Panel -->
+    <view class="panel-card">
+      <view class="switch-row">
+        <view class="switch-label-group">
+          <text class="switch-title">🧲 点聚合功能 (:enable-cluster)</text>
+          <text class="switch-subtitle">视口内相近点自动合并为圆形数字气泡(挂右上角+N角标)，点击局部放大展开</text>
+        </view>
+        <switch
+          :checked="enableCluster"
+          color="#3b82f6"
+          @change="toggleCluster"
+        />
+      </view>
+
+      <view class="action-btn-row" style="margin-top: 16rpx;">
+        <view class="action-btn primary full-width" hover-class="btn-hover" @click="generateDenseClusteredPOIs">
+          <text class="action-btn-icon">⚡</text>
+          <text class="action-btn-text">生成 4 组密集打卡点群 (40个点) 体验自动聚合与点击展开</text>
+        </view>
+      </view>
+
+      <view style="margin-top: 14rpx; display: flex; align-items: center; justify-content: flex-start; gap: 12rpx;">
+        <text style="font-size: 24rpx; color: #64748b;">聚合距离阈值:</text>
+        <view
+          v-for="r in [40, 60, 90]"
+          :key="r"
+          class="preset-chip"
+          :class="{ primary: clusterRadius === r }"
+          @click="clusterRadius = r"
+        >
+          <text class="chip-text">{{ r }}px</text>
+        </view>
+      </view>
+    </view>
+
+    <!-- GeoJSON Vector Layer Panel -->
+    <view class="panel-card">
+      <view class="switch-row">
+        <view class="switch-label-group">
+          <text class="switch-title">🗺️ GeoJSON 行政区划与城市边界 (:geojson)</text>
+          <text class="switch-subtitle">标准 GeoJSON 数据驱动，支持多边形填充、边框色、线宽与虚线配置</text>
+        </view>
+        <switch
+          :checked="showGeoJson"
+          color="#3b82f6"
+          @change="toggleGeoJson"
+        />
+      </view>
+
+      <view v-if="showGeoJson" style="margin-top: 18rpx;">
+        <!-- Dataset Selector -->
+        <view style="display: flex; align-items: center; gap: 10rpx; margin-bottom: 14rpx; flex-wrap: wrap;">
+          <text style="font-size: 24rpx; color: #64748b; font-weight: 600;">边界样本:</text>
+          <view
+            v-for="(item, idx) in sampleGeoJsonList"
+            :key="idx"
+            class="preset-chip"
+            :class="{ primary: currentGeoJsonIndex === idx }"
+            @click="currentGeoJsonIndex = idx"
+          >
+            <text class="chip-text">{{ item.name }}</text>
+          </view>
+        </view>
+
+        <!-- Color Preset Selector -->
+        <view style="display: flex; align-items: center; gap: 10rpx; margin-bottom: 14rpx; flex-wrap: wrap;">
+          <text style="font-size: 24rpx; color: #64748b; font-weight: 600;">填充主题:</text>
+          <view
+            v-for="c in geoJsonColors"
+            :key="c.name"
+            class="preset-chip"
+            :style="{
+              background: selectedGeoJsonColor.name === c.name ? c.fillColor : '#f1f5f9',
+              borderColor: c.color,
+            }"
+            @click="selectedGeoJsonColor = c"
+          >
+            <text class="chip-text" :style="{ color: selectedGeoJsonColor.name === c.name ? '#ffffff' : '#334155' }">
+              ● {{ c.name }}
+            </text>
+          </view>
+        </view>
+
+        <!-- Fill Opacity & Stroke Width Controls -->
+        <view style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12rpx; margin-bottom: 16rpx;">
+          <view style="display: flex; align-items: center; gap: 8rpx;">
+            <text style="font-size: 24rpx; color: #64748b;">透明度:</text>
+            <view
+              v-for="op in [0.15, 0.35, 0.6]"
+              :key="op"
+              class="preset-chip"
+              :class="{ primary: geoJsonFillOpacity === op }"
+              @click="geoJsonFillOpacity = op"
+            >
+              <text class="chip-text">{{ Math.round(op * 100) }}%</text>
+            </view>
+          </view>
+
+          <view style="display: flex; align-items: center; gap: 8rpx;">
+            <text style="font-size: 24rpx; color: #64748b;">描边粗细:</text>
+            <view
+              v-for="w in [1, 2, 4]"
+              :key="w"
+              class="preset-chip"
+              :class="{ primary: geoJsonWeight === w }"
+              @click="geoJsonWeight = w"
+            >
+              <text class="chip-text">{{ w }}px</text>
+            </view>
+          </view>
+
+          <view style="display: flex; align-items: center; gap: 8rpx;">
+            <text style="font-size: 24rpx; color: #64748b;">虚线边框:</text>
+            <view
+              class="preset-chip"
+              :class="{ primary: isGeoJsonDashed }"
+              @click="isGeoJsonDashed = !isGeoJsonDashed"
+            >
+              <text class="chip-text">{{ isGeoJsonDashed ? '虚线 (6,6)' : '实线' }}</text>
+            </view>
+          </view>
+        </view>
+
+        <!-- Action Button: fitBounds('geojson') -->
+        <view class="action-btn-row">
+          <view class="action-btn fit-btn full-width" hover-class="btn-hover" @click="fitGeoJsonBounds">
+            <text class="action-btn-icon">🎯</text>
+            <text class="action-btn-text">视野自适应包裹城市边界 (fitBounds('geojson'))</text>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <!-- Curved Travel Routes & Flowing Lines Panel -->
+    <view class="panel-card">
+      <view class="switch-row">
+        <view class="switch-label-group">
+          <text class="switch-title">✈️ 弧线旅行航线与流动虚线 (Curved & Flowing)</text>
+          <text class="switch-subtitle">基于二次贝塞尔曲线的航线弧度计算，结合 CSS/Canvas 2D 蚂蚁线粒子流光动效</text>
+        </view>
+        <switch
+          :checked="showFlightRoutes"
+          color="#3b82f6"
+          @change="toggleFlightRoutes"
+        />
+      </view>
+
+      <view v-if="showFlightRoutes" style="margin-top: 18rpx;">
+        <!-- Flowing Animation Toggle & Speed -->
+        <view style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 14rpx;">
+          <text style="font-size: 26rpx; color: #334155; font-weight: 600;">流光动效 (flowing):</text>
+          <switch
+            :checked="isFlowingActive"
+            color="#06b6d4"
+            @change="toggleFlowingActive"
+          />
+        </view>
+
+        <!-- Curvature Preset Selector -->
+        <view style="display: flex; align-items: center; gap: 10rpx; margin-bottom: 14rpx; flex-wrap: wrap;">
+          <text style="font-size: 24rpx; color: #64748b; font-weight: 600;">航线曲率:</text>
+          <view
+            v-for="curv in [-0.25, 0, 0.15, 0.25, 0.4]"
+            :key="curv"
+            class="preset-chip"
+            :class="{ primary: currentCurvature === curv }"
+            @click="setCurvature(curv)"
+          >
+            <text class="chip-text">{{ curv === 0 ? '直线(0)' : curv > 0 ? `上弧 +${curv}` : `下弧 ${curv}` }}</text>
+          </view>
+        </view>
+
+        <!-- Flow Speed Selector -->
+        <view style="display: flex; align-items: center; gap: 10rpx; margin-bottom: 14rpx; flex-wrap: wrap;">
+          <text style="font-size: 24rpx; color: #64748b; font-weight: 600;">流动速度:</text>
+          <view
+            v-for="spd in [0.5, 1, 1.8, 3]"
+            :key="spd"
+            class="preset-chip"
+            :class="{ primary: currentFlowSpeed === spd }"
+            @click="setFlowSpeed(spd)"
+          >
+            <text class="chip-text">{{ spd }}x 速度</text>
+          </view>
+        </view>
+
+        <!-- Fit Bounds for Flight Routes -->
+        <view class="action-btn-row">
+          <view class="action-btn fit-btn full-width" hover-class="btn-hover" @click="fitFlightRoutesBounds">
+            <text class="action-btn-icon">🎯</text>
+            <text class="action-btn-text">自适应包裹弧线航线 (包含弧顶范围)</text>
+          </view>
         </view>
       </view>
     </view>
@@ -215,6 +441,20 @@
           <text class="action-btn-icon">😀</text>
           <text class="action-btn-text">追加 Emoji 点</text>
         </view>
+        <view class="action-btn primary" hover-class="btn-hover" @click="addAvatarMarker">
+          <text class="action-btn-icon">👤</text>
+          <text class="action-btn-text">追加头像气泡</text>
+        </view>
+      </view>
+      <view class="action-btn-row" style="margin-top: 14rpx;">
+        <view class="action-btn track-btn" hover-class="btn-hover" @click="generateScatteredTracksAndFit">
+          <text class="action-btn-icon">📍</text>
+          <text class="action-btn-text">生成分散足迹点并包裹(纯点)</text>
+        </view>
+        <view class="action-btn fit-btn" hover-class="btn-hover" @click="fitAllTrackPoints">
+          <text class="action-btn-icon">🎯</text>
+          <text class="action-btn-text">视野包裹足迹点 (fitBounds)</text>
+        </view>
       </view>
       <view class="action-btn-row" style="margin-top: 14rpx;">
         <view class="action-btn danger" hover-class="btn-hover" @click="clearAllMarkers">
@@ -233,6 +473,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import UniLeafletMap from '@/components/uni-leaflet/UniLeafletMap.vue';
+import { generateCurvedPolyline } from '@/components/uni-leaflet';
 import type {
   LatLngTuple,
   Point,
@@ -242,6 +483,7 @@ import type {
   PolygonOptions,
   CircleOptions,
   OverlayClickEvent,
+  GeoJsonStyleOptions,
 } from '@/components/uni-leaflet/types';
 
 const mapRef = ref<InstanceType<typeof UniLeafletMap> | null>(null);
@@ -259,15 +501,155 @@ const showPolylines = ref(true);
 const showPolygons = ref(true);
 const showCircles = ref(true);
 
+// Marker Clustering
+const enableCluster = ref(true);
+const clusterRadius = ref(60);
+
+// GeoJSON Feature Layers & Styling
+const showGeoJson = ref(true);
+const currentGeoJsonIndex = ref(0);
+
+const sampleGeoJsonList = [
+  {
+    name: '北京核心二环行政区 (东城/西城)',
+    data: {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          properties: {
+            name: '北京东城区行政区划边界',
+            adcode: '110101',
+            level: 'district',
+            area: '41.84 km²',
+          },
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [
+                [116.3985, 39.9575],
+                [116.4350, 39.9560],
+                [116.4420, 39.9320],
+                [116.4435, 39.8960],
+                [116.4180, 39.8680],
+                [116.3985, 39.8700],
+                [116.3985, 39.9575],
+              ],
+            ],
+          },
+        },
+        {
+          type: 'Feature',
+          properties: {
+            name: '北京西城区行政区划边界',
+            adcode: '110102',
+            level: 'district',
+            area: '50.70 km²',
+          },
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [
+                [116.3985, 39.9575],
+                [116.3985, 39.8700],
+                [116.3450, 39.8700],
+                [116.3400, 39.9050],
+                [116.3480, 39.9450],
+                [116.3750, 39.9580],
+                [116.3985, 39.9575],
+              ],
+            ],
+          },
+        },
+      ],
+    },
+  },
+  {
+    name: '朝阳奥森与 CBD 示范区',
+    data: {
+      type: 'FeatureCollection',
+      features: [
+        {
+          type: 'Feature',
+          properties: {
+            name: '奥林匹克中心区公园带',
+            adcode: '110105-01',
+            level: 'subdistrict',
+            area: '11.59 km²',
+          },
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [
+                [116.3750, 40.0150],
+                [116.4100, 40.0150],
+                [116.4100, 39.9700],
+                [116.3750, 39.9700],
+                [116.3750, 40.0150],
+              ],
+            ],
+          },
+        },
+        {
+          type: 'Feature',
+          properties: {
+            name: '北京 CBD 国际商务核心区',
+            adcode: '110105-02',
+            level: 'subdistrict',
+            area: '7.04 km²',
+          },
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [
+                [116.4450, 39.9250],
+                [116.4800, 39.9250],
+                [116.4800, 39.8950],
+                [116.4450, 39.8950],
+                [116.4450, 39.9250],
+              ],
+            ],
+          },
+        },
+      ],
+    },
+  },
+];
+
+const sampleGeoJson = computed(() => sampleGeoJsonList[currentGeoJsonIndex.value].data);
+
+const geoJsonColors = [
+  { name: '科技蓝', color: '#1d4ed8', fillColor: '#3b82f6' },
+  { name: '翡翠绿', color: '#047857', fillColor: '#10b981' },
+  { name: '珊瑚红', color: '#be123c', fillColor: '#f43f5e' },
+  { name: '炫彩紫', color: '#6d28d9', fillColor: '#8b5cf6' },
+  { name: '琥珀金', color: '#b45309', fillColor: '#f59e0b' },
+];
+
+const selectedGeoJsonColor = ref(geoJsonColors[0]);
+const geoJsonFillOpacity = ref(0.25);
+const geoJsonWeight = ref(2);
+const isGeoJsonDashed = ref(false);
+
+const currentGeoJsonStyle = computed<GeoJsonStyleOptions>(() => ({
+  color: selectedGeoJsonColor.value.color,
+  weight: geoJsonWeight.value,
+  opacity: 1,
+  fillColor: selectedGeoJsonColor.value.fillColor,
+  fillOpacity: geoJsonFillOpacity.value,
+  dashArray: isGeoJsonDashed.value ? [6, 6] : undefined,
+}));
+
 // Tianditu Token
 const tiandituKey = ref('56b81006f361f6406d0e940d2f89a39c');
 
 // Marker Icon Filter Tab
-type IconTypeFilter = 'all' | 'emoji' | 'png' | 'svg_file' | 'svg_inline';
+type IconTypeFilter = 'all' | 'emoji' | 'png' | 'svg_file' | 'svg_inline' | 'avatar';
 const currentIconType = ref<IconTypeFilter>('all');
 
 const iconFilterTabs = [
   { type: 'all' as IconTypeFilter, name: '全部图标', icon: '🌟' },
+  { type: 'avatar' as IconTypeFilter, name: '头像气泡', icon: '👤' },
   { type: 'emoji' as IconTypeFilter, name: 'Emoji 图标', icon: '😀' },
   { type: 'png' as IconTypeFilter, name: 'PNG 图片', icon: '🖼️' },
   { type: 'svg_file' as IconTypeFilter, name: 'SVG 文件', icon: '📐' },
@@ -404,6 +786,50 @@ const initialMarkers: MarkerOptions[] = [
     label: { text: '国家大剧院 (内联SVG)' },
     data: { iconType: 'svg_inline' },
   },
+
+  // --- 5. Avatar Bubble Icons (Photo + Badge + Pulse Halo) ---
+  {
+    id: 'm11_avatar_heart',
+    latLng: [39.9195, 116.3972],
+    title: '旅行博主 小羽 (足迹打卡中)',
+    icon: {
+      type: 'avatar',
+      url: '/static/icons/pin-purple.png',
+      badgeText: '❤️',
+      pulse: true,
+      borderColor: '#f43f5e',
+    },
+    label: { text: '小羽 (❤️ 实时足迹)' },
+    data: { iconType: 'avatar' },
+  },
+  {
+    id: 'm12_avatar_crown',
+    latLng: [39.9142, 116.4045],
+    title: '城市探索官 Leo (VIP 打卡达人)',
+    icon: {
+      type: 'avatar',
+      url: '/static/icons/pin-blue.png',
+      badgeText: '👑',
+      pulse: true,
+      borderColor: '#f59e0b',
+    },
+    label: { text: '探索官 Leo (👑 VIP)' },
+    data: { iconType: 'avatar' },
+  },
+  {
+    id: 'm13_avatar_fire',
+    latLng: [39.9080, 116.3930],
+    title: '摄影达人 Mia',
+    icon: {
+      type: 'avatar',
+      url: '/static/icons/marker-star.png',
+      badgeText: '🔥',
+      pulse: false,
+      borderColor: '#10b981',
+    },
+    label: { text: '摄影达人 Mia (🔥 热门)' },
+    data: { iconType: 'avatar' },
+  },
 ];
 
 // Reactive dynamic markers array
@@ -455,10 +881,142 @@ const samplePolylines = ref<PolylineOptions[]>([
     ],
     color: '#f59e0b',
     width: 4,
-    dashArray: [6, 6],
-    label: '长安街主干道',
+    dashArray: [8, 8],
+    flowing: true,
+    flowSpeed: 1.2,
+    label: '长安街主干道 (流动虚线)',
+  },
+  {
+    id: 'l3',
+    latLngs: [
+      [39.9163, 116.3972],
+      [39.9928, 116.3965],
+    ],
+    color: '#06b6d4',
+    width: 4,
+    dashArray: [10, 8],
+    curved: true,
+    curvature: 0.25,
+    flowing: true,
+    flowSpeed: 1.5,
+    label: '故宫至奥森公园 (弧线流光)',
   },
 ]);
+
+// Flight Routes State & Computeds
+const showFlightRoutes = ref(false);
+const isFlowingActive = ref(true);
+const currentCurvature = ref(0.25);
+const currentFlowSpeed = ref(1.2);
+
+const flightRoutePolylines = computed<PolylineOptions[]>(() => {
+  return [
+    {
+      id: 'flight-bj-sh',
+      latLngs: [
+        [39.9042, 116.4074], // Beijing
+        [31.2304, 121.4737], // Shanghai
+      ],
+      color: '#06b6d4',
+      width: 4,
+      curved: currentCurvature.value !== 0,
+      curvature: currentCurvature.value,
+      flowing: isFlowingActive.value,
+      flowSpeed: currentFlowSpeed.value,
+      dashArray: [10, 8],
+      label: '北京-上海 (京沪航线)',
+    },
+    {
+      id: 'flight-bj-gz',
+      latLngs: [
+        [39.9042, 116.4074], // Beijing
+        [23.1291, 113.2644], // Guangzhou
+      ],
+      color: '#8b5cf6',
+      width: 4,
+      curved: currentCurvature.value !== 0,
+      curvature: currentCurvature.value * 0.9,
+      flowing: isFlowingActive.value,
+      flowSpeed: currentFlowSpeed.value * 1.1,
+      dashArray: [12, 8],
+      label: '北京-广州 (京广航线)',
+    },
+    {
+      id: 'flight-bj-cd',
+      latLngs: [
+        [39.9042, 116.4074], // Beijing
+        [30.5728, 104.0668], // Chengdu
+      ],
+      color: '#ec4899',
+      width: 4,
+      curved: currentCurvature.value !== 0,
+      curvature: -currentCurvature.value * 0.85,
+      flowing: isFlowingActive.value,
+      flowSpeed: currentFlowSpeed.value * 0.9,
+      dashArray: [10, 8],
+      label: '北京-成都 (京蓉航线)',
+    },
+    {
+      id: 'flight-sh-sz',
+      latLngs: [
+        [31.2304, 121.4737], // Shanghai
+        [22.5431, 114.0579], // Shenzhen
+      ],
+      color: '#10b981',
+      width: 4,
+      curved: currentCurvature.value !== 0,
+      curvature: currentCurvature.value * 0.8,
+      flowing: isFlowingActive.value,
+      flowSpeed: currentFlowSpeed.value * 1.2,
+      dashArray: [10, 8],
+      label: '上海-深圳 (沿海航线)',
+    },
+  ];
+});
+
+const activePolylines = computed<PolylineOptions[]>(() => {
+  const res: PolylineOptions[] = [];
+  if (showPolylines.value) {
+    res.push(...samplePolylines.value);
+  }
+  if (showFlightRoutes.value) {
+    res.push(...flightRoutePolylines.value);
+  }
+  return res;
+});
+
+function toggleFlightRoutes() {
+  showFlightRoutes.value = !showFlightRoutes.value;
+  if (showFlightRoutes.value) {
+    setTimeout(() => {
+      fitFlightRoutesBounds();
+    }, 100);
+  }
+}
+
+function toggleFlowingActive() {
+  isFlowingActive.value = !isFlowingActive.value;
+}
+
+function setCurvature(curv: number) {
+  currentCurvature.value = curv;
+}
+
+function setFlowSpeed(spd: number) {
+  currentFlowSpeed.value = spd;
+}
+
+function fitFlightRoutesBounds() {
+  if (!mapRef.value || flightRoutePolylines.value.length === 0) return;
+  mapRef.value.fitBounds(flightRoutePolylines.value, {
+    padding: [60, 60],
+    animate: true,
+  });
+  uni.showToast({
+    title: '已聚焦包裹全国弧线航线网络',
+    icon: 'none',
+  });
+}
 
 // Sample Polygons with Labels
 const samplePolygons = ref<PolygonOptions[]>([
@@ -496,6 +1054,7 @@ const activeOverlayCount = computed(() => {
   let count = 0;
   if (showMarkers.value) count += filteredMarkers.value.length;
   if (showPolylines.value) count += samplePolylines.value.length;
+  if (showFlightRoutes.value) count += flightRoutePolylines.value.length;
   if (showPolygons.value) count += samplePolygons.value.length;
   if (showCircles.value) count += sampleCircles.value.length;
   return count;
@@ -677,6 +1236,37 @@ function addEmojiMarker() {
   uni.showToast({ title: `已追加 Emoji 图标 #${idx}`, icon: 'none' });
 }
 
+function addAvatarMarker() {
+  const curLat = center.value[0];
+  const curLng = center.value[1];
+  const avatars = [
+    { name: 'Alice', badge: '❤️', color: '#f43f5e', icon: '/static/icons/pin-purple.png' },
+    { name: 'Bob', badge: '👑', color: '#f59e0b', icon: '/static/icons/pin-blue.png' },
+    { name: 'Charlie', badge: '🔥', color: '#10b981', icon: '/static/icons/marker-star.png' },
+    { name: 'Diana', badge: '⭐', color: '#8b5cf6', icon: '/static/icons/pin-red.png' },
+  ];
+  const sample = avatars[Math.floor(Math.random() * avatars.length)];
+  const newMarker: MarkerOptions = {
+    id: `avatar_${Date.now()}`,
+    latLng: [
+      curLat + (Math.random() - 0.5) * 0.015,
+      curLng + (Math.random() - 0.5) * 0.02,
+    ],
+    title: `${sample.name} 的足迹打卡`,
+    icon: {
+      type: 'avatar',
+      url: sample.icon,
+      badgeText: sample.badge,
+      pulse: true,
+      borderColor: sample.color,
+    },
+    label: { text: `${sample.name} (${sample.badge})` },
+    data: { iconType: 'avatar' },
+  };
+  dynamicMarkers.value.push(newMarker);
+  uni.showToast({ title: `已追加 ${sample.name} 头像气泡`, icon: 'none' });
+}
+
 function clearAllMarkers() {
   dynamicMarkers.value = [];
   uni.showToast({ title: '已清空标记点', icon: 'none' });
@@ -685,7 +1275,284 @@ function clearAllMarkers() {
 function resetPresetMarkers() {
   dynamicMarkers.value = [...initialMarkers];
   currentIconType.value = 'all';
-  uni.showToast({ title: '已重置 10 个示例标记', icon: 'none' });
+  uni.showToast({ title: `已重置 ${initialMarkers.length} 个示例标记`, icon: 'none' });
+}
+
+function toggleCluster(e?: any) {
+  if (e && e.detail && typeof e.detail.value === 'boolean') {
+    enableCluster.value = e.detail.value;
+  } else {
+    enableCluster.value = !enableCluster.value;
+  }
+}
+
+function toggleGeoJson(e?: any) {
+  if (e && e.detail && typeof e.detail.value === 'boolean') {
+    showGeoJson.value = e.detail.value;
+  } else {
+    showGeoJson.value = !showGeoJson.value;
+  }
+}
+
+function onGeoJsonClick(feature: any) {
+  const name = feature?.properties?.name || 'GeoJSON 矢量要素';
+  const area = feature?.properties?.area ? `(面积: ${feature.properties.area})` : '';
+  lastClickedTarget.value = `GeoJSON 要素: ${name} ${area}`;
+  uni.showToast({
+    title: `点击: ${name}`,
+    icon: 'none',
+  });
+}
+
+function fitGeoJsonBounds() {
+  if (!showGeoJson.value) {
+    showGeoJson.value = true;
+  }
+  setTimeout(() => {
+    mapRef.value?.fitBounds('geojson', { padding: [50, 50], animate: true });
+    uni.showToast({
+      title: '已自适应缩放到 GeoJSON 城市边界',
+      icon: 'none',
+    });
+  }, 60);
+}
+
+function onClusterClick(cluster: any) {
+  lastClickedTarget.value = `聚合气泡: 共合并 ${cluster.count} 个打卡点 (已自动放大展开)`;
+  uni.showToast({
+    title: `聚合点 (+${cluster.count}) 展开`,
+    icon: 'none',
+  });
+}
+
+function generateDenseClusteredPOIs() {
+  const clusters = [
+    { name: '王府井商业街群', center: [39.9142, 116.411], count: 12, icon: '🛍️' },
+    { name: '西单大悦城打卡群', center: [39.9085, 116.373], count: 10, icon: '☕' },
+    { name: '后海什刹海景区群', center: [39.9385, 116.388], count: 8, icon: '🚣' },
+    { name: '三里屯时尚街区群', center: [39.9348, 116.455], count: 10, icon: '🎨' },
+  ];
+
+  const newMarkers: MarkerOptions[] = [];
+  clusters.forEach((c, cIdx) => {
+    for (let i = 0; i < c.count; i++) {
+      const lat = c.center[0] + (Math.random() - 0.5) * 0.0035;
+      const lng = c.center[1] + (Math.random() - 0.5) * 0.0045;
+      newMarkers.push({
+        id: `dense_${cIdx}_${i}`,
+        latLng: [lat, lng],
+        title: `${c.name} - 点位 #${i + 1}`,
+        icon: { text: c.icon, size: [32, 32] },
+        label: { text: `${c.name.slice(0, 3)} #${i + 1}` },
+        data: { iconType: 'emoji' },
+      });
+    }
+  });
+
+  dynamicMarkers.value = newMarkers;
+  showMarkers.value = true;
+  enableCluster.value = true;
+  currentIconType.value = 'all';
+
+  setTimeout(() => {
+    mapRef.value?.fitBounds(newMarkers, { padding: [60, 60], animate: true });
+  }, 100);
+
+  uni.showToast({
+    title: `已生成 4 组密集聚合点群 (共 ${newMarkers.length} 个点)`,
+    icon: 'none',
+  });
+}
+
+/**
+ * Selectively display Point / Line / Polygon and automatically fitBounds
+ */
+function selectOnlyAndFit(type: 'markers' | 'polylines' | 'polygons' | 'all') {
+  if (type === 'markers') {
+    showMarkers.value = true;
+    showPolylines.value = false;
+    showPolygons.value = false;
+    showCircles.value = false;
+    setTimeout(() => {
+      mapRef.value?.fitBounds(filteredMarkers.value, { padding: [50, 50], animate: true });
+    }, 60);
+    uni.showToast({ title: '已切换为仅显示【点】，并自动聚焦包裹', icon: 'none' });
+  } else if (type === 'polylines') {
+    showMarkers.value = false;
+    showPolylines.value = true;
+    showPolygons.value = false;
+    showCircles.value = false;
+    setTimeout(() => {
+      mapRef.value?.fitBounds(activePolylines.value, { padding: [50, 50], animate: true });
+    }, 60);
+    uni.showToast({ title: '已切换为仅显示【线】，并自动聚焦包裹', icon: 'none' });
+  } else if (type === 'polygons') {
+    showMarkers.value = false;
+    showPolylines.value = false;
+    showPolygons.value = true;
+    showCircles.value = false;
+    setTimeout(() => {
+      mapRef.value?.fitBounds(samplePolygons.value, { padding: [50, 50], animate: true });
+    }, 60);
+    uni.showToast({ title: '已切换为仅显示【面】，并自动聚焦包裹', icon: 'none' });
+  } else if (type === 'all') {
+    showMarkers.value = true;
+    showPolylines.value = true;
+    showPolygons.value = true;
+    showCircles.value = true;
+    setTimeout(() => {
+      fitCurrentlySelectedOverlays();
+    }, 60);
+    uni.showToast({ title: '已显示全部点、线、面，并自动包裹全景', icon: 'none' });
+  }
+}
+
+/**
+ * Auto-fit bounds to all currently selected/checked overlays (points, lines, polygons)
+ */
+function fitCurrentlySelectedOverlays() {
+  const points: LatLngTuple[] = [];
+
+  if (showMarkers.value) {
+    for (const m of filteredMarkers.value) {
+      if (m && m.latLng) points.push(m.latLng);
+    }
+  }
+  if (showPolylines.value || showFlightRoutes.value) {
+    for (const p of activePolylines.value) {
+      if (p.curved) {
+        points.push(...generateCurvedPolyline(p.latLngs, p.curvature ?? 0.2));
+      } else if (p && p.latLngs) {
+        points.push(...p.latLngs);
+      }
+    }
+  }
+  if (showPolygons.value) {
+    for (const pg of samplePolygons.value) {
+      if (pg && pg.latLngs) points.push(...pg.latLngs);
+    }
+  }
+  if (showCircles.value) {
+    for (const c of sampleCircles.value) {
+      if (c && c.latLng) points.push(c.latLng);
+    }
+  }
+
+  if (points.length === 0) {
+    uni.showToast({ title: '当前未勾选任何要素，请先勾选', icon: 'none' });
+    return;
+  }
+
+  mapRef.value?.fitBounds(points, { padding: [50, 50], animate: true });
+
+  const activeNames: string[] = [];
+  if (showMarkers.value) activeNames.push('点');
+  if (showPolylines.value) activeNames.push('线');
+  if (showPolygons.value) activeNames.push('面');
+  if (showCircles.value) activeNames.push('圆');
+
+  uni.showToast({
+    title: `已包裹当前选中的[${activeNames.join('/')}]要素`,
+    icon: 'none',
+    duration: 1500,
+  });
+}
+
+/**
+ * Auto-fit map viewport to bound all markers (pure points)
+ */
+function fitAllTrackPoints() {
+  const points: LatLngTuple[] = [];
+
+  // 只计算并包裹点标注 (Markers / Footprints)
+  for (const m of filteredMarkers.value) {
+    if (m && m.latLng) points.push(m.latLng);
+  }
+
+  if (points.length === 0) {
+    uni.showToast({ title: '暂无足迹点可供包裹', icon: 'none' });
+    return;
+  }
+
+  // 确保点标记可见
+  showMarkers.value = true;
+
+  // Call fitBounds on UniLeafletMap instance with points only
+  mapRef.value?.fitBounds(points, { padding: [40, 40], animate: true });
+  uni.showToast({
+    title: `已视野自适应包裹 ${points.length} 个足迹点`,
+    icon: 'success',
+  });
+}
+
+/**
+ * Generate wide-spread footprint points across Beijing and auto fitBounds (points only, no lines)
+ */
+function generateScatteredTracksAndFit() {
+  const tourSpots: MarkerOptions[] = [
+    {
+      id: `spot_tour_1_${Date.now()}`,
+      latLng: [39.9998, 116.2755], // 颐和园 (西北点)
+      title: '颐和园足迹',
+      icon: { text: '🏯', size: [34, 34] },
+      label: { text: '颐和园足迹' },
+      data: { iconType: 'emoji' },
+    },
+    {
+      id: `spot_tour_2_${Date.now()}`,
+      latLng: [40.0165, 116.3888], // 奥林匹克森林公园 (北侧点)
+      title: '奥森公园足迹',
+      icon: { text: '🌲', size: [34, 34] },
+      label: { text: '奥森公园足迹' },
+      data: { iconType: 'emoji' },
+    },
+    {
+      id: `spot_tour_3_${Date.now()}`,
+      latLng: [39.9075, 116.4590], // 国贸 CBD (东侧点)
+      title: '国贸CBD足迹',
+      icon: { text: '🏙️', size: [34, 34] },
+      label: { text: '国贸CBD足迹' },
+      data: { iconType: 'emoji' },
+    },
+    {
+      id: `spot_tour_4_${Date.now()}`,
+      latLng: [39.8822, 116.4066], // 天坛 (南侧点)
+      title: '天坛足迹',
+      icon: { text: '⛩️', size: [34, 34] },
+      label: { text: '天坛足迹' },
+      data: { iconType: 'emoji' },
+    },
+    {
+      id: `spot_tour_5_${Date.now()}`,
+      latLng: [39.9163, 116.3972], // 故宫 (中心点)
+      title: '故宫中心足迹',
+      icon: { text: '🏛️', size: [34, 34] },
+      label: { text: '故宫中心足迹' },
+      data: { iconType: 'emoji' },
+    },
+  ];
+
+  dynamicMarkers.value = [...tourSpots];
+  currentIconType.value = 'all';
+
+  // 只显示足迹点，隐藏折线、多边形与圆形
+  showMarkers.value = true;
+  showPolylines.value = false;
+  showPolygons.value = false;
+  showCircles.value = false;
+
+  const trackPoints: LatLngTuple[] = tourSpots.map((s) => s.latLng);
+
+  // Perform fitBounds to smoothly wrap all 5 points
+  setTimeout(() => {
+    mapRef.value?.fitBounds(trackPoints, { padding: [50, 50], animate: true });
+  }, 50);
+
+  uni.showToast({
+    title: '已生成 5 个足迹点，正在自适应包裹视野...',
+    icon: 'none',
+    duration: 2000,
+  });
 }
 
 // Preset tile layers definition
@@ -1149,6 +2016,71 @@ function updateTiandituKey() {
   background: #fef2f2;
   border: 1rpx solid #fecaca;
   color: #b91c1c;
+}
+
+.action-btn.track-btn {
+  background: #f5f3ff;
+  border: 1rpx solid #ddd6fe;
+  color: #6d28d9;
+  font-weight: 600;
+}
+
+.action-btn.fit-btn {
+  background: #eff6ff;
+  border: 1rpx solid #bfdbfe;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.action-btn.full-width {
+  width: 100%;
+  box-sizing: border-box;
+  justify-content: center;
+}
+
+.preset-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12rpx;
+}
+
+.preset-chip {
+  flex: 1;
+  min-width: 140rpx;
+  background: #f1f5f9;
+  border: 1rpx solid #e2e8f0;
+  border-radius: 12rpx;
+  padding: 12rpx 14rpx;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.preset-chip:hover {
+  background: #e2e8f0;
+}
+
+.preset-chip.primary {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.preset-chip.primary:hover {
+  background: #dbeafe;
+}
+
+.preset-chip .chip-text {
+  font-size: 22rpx;
+  color: #334155;
+  font-weight: 500;
+}
+
+.preset-chip.primary .chip-text {
+  color: #1d4ed8;
+  font-weight: 600;
 }
 
 .action-btn.outline {

@@ -49,52 +49,6 @@
   </view>
 </template>
 
-<script lang="ts">
-export default {
-  methods: {
-    onRender_MapMove(this: any, val: any) {
-      const center = val?.center || val;
-      const zoom = val?.zoom;
-      if (center) {
-        this.$emit('update:center', center);
-        this.$emit('move', { center, zoom });
-      }
-    },
-    onRender_MapMoveEnd(this: any, val: any) {
-      const center = val?.center || val;
-      const zoom = val?.zoom;
-      if (center) {
-        this.$emit('update:center', center);
-        this.$emit('moveend', { center, zoom });
-      }
-    },
-    onRender_MapZoom(this: any, z: any) {
-      this.$emit('update:zoom', z);
-      this.$emit('zoom', z);
-    },
-    onRender_MapZoomEnd(this: any, z: any) {
-      this.$emit('update:zoom', z);
-      this.$emit('zoomend', z);
-    },
-    onRender_MapClick(this: any, val: any) {
-      const latLng = val?.latLng || val;
-      const point = val?.point || { x: 0, y: 0 };
-      this.$emit('click', { latLng, point });
-    },
-    onRender_OverlayClick(this: any, val: any) {
-      this.$emit('overlay-click', val);
-      if (val && val.type === 'marker') this.$emit('marker-click', val.data);
-      if (val && val.type === 'polyline') this.$emit('polyline-click', val.data);
-      if (val && val.type === 'polygon') this.$emit('polygon-click', val.data);
-      if (val && val.type === 'circle') this.$emit('circle-click', val.data);
-    },
-    onRender_Ready(this: any) {
-      this.$emit('ready', this);
-    },
-  },
-};
-</script>
-
 <script setup lang="ts">
 import {
   ref,
@@ -116,6 +70,13 @@ import type {
   CircleOptions,
   MapOverlays,
   OverlayClickEvent,
+  FitBoundsOptions,
+  LatLngBoundsExpression,
+  MapBounds,
+  ClusterOptions,
+  ClusterGroup,
+  GeoJsonStyle,
+  GeoJsonStyleOptions,
 } from './types';
 import { createMapEngine } from './engine/factory';
 
@@ -168,6 +129,30 @@ const props = defineProps({
     type: Object as PropType<MapOverlays>,
     default: () => undefined,
   },
+  enableCluster: {
+    type: Boolean,
+    default: false,
+  },
+  clusterRadius: {
+    type: Number,
+    default: 60,
+  },
+  clusterMaxZoom: {
+    type: Number,
+    default: 17,
+  },
+  clusterOptions: {
+    type: Object as PropType<ClusterOptions>,
+    default: () => undefined,
+  },
+  geojson: {
+    type: [Object, Array] as PropType<any>,
+    default: () => null,
+  },
+  geojsonStyle: {
+    type: [Object, Function] as PropType<GeoJsonStyle>,
+    default: () => undefined,
+  },
   width: {
     type: String,
     default: '100%',
@@ -192,9 +177,11 @@ const emit = defineEmits<{
   (e: 'zoomend', val: number): void;
   (e: 'click', val: { latLng: LatLngTuple; point: Point }): void;
   (e: 'marker-click', val: MarkerOptions): void;
+  (e: 'cluster-click', val: ClusterGroup): void;
   (e: 'polyline-click', val: PolylineOptions): void;
   (e: 'polygon-click', val: PolygonOptions): void;
   (e: 'circle-click', val: CircleOptions): void;
+  (e: 'geojson-click', val: any): void;
   (e: 'overlay-click', val: OverlayClickEvent): void;
 }>();
 
@@ -208,6 +195,22 @@ let engine: IMapEngine | null = null;
 let isInternalUpdating = false;
 
 // Compute payload for renderjs on App-Plus
+const fitBoundsAction = ref<{
+  bounds: any;
+  options?: FitBoundsOptions;
+  timestamp: number;
+} | null>(null);
+
+const geojsonRevision = ref(0);
+
+watch(
+  [() => props.geojson, () => props.overlays?.geojson],
+  () => {
+    geojsonRevision.value++;
+  },
+  { deep: true }
+);
+
 const mapPropsPayload = computed(() => ({
   appMapId,
   center: props.center,
@@ -222,6 +225,14 @@ const mapPropsPayload = computed(() => ({
   polygons: props.polygons,
   circles: props.circles,
   overlays: props.overlays,
+  geojson: props.geojson,
+  geojsonStyle: props.geojsonStyle,
+  geojsonRevision: geojsonRevision.value,
+  enableCluster: props.enableCluster,
+  clusterRadius: props.clusterRadius,
+  clusterMaxZoom: props.clusterMaxZoom,
+  clusterOptions: props.clusterOptions,
+  fitBoundsAction: fitBoundsAction.value,
 }));
 
 // Touch & Mouse Wheel handlers for Canvas/Mini-program
@@ -332,29 +343,87 @@ watch(
   }
 );
 
-// Overlays Watchers
-function syncCombinedOverlays() {
-  if (!engine) return;
-  const combined: MapOverlays = {
-    ...(props.overlays || {}),
-  };
-  if (props.markers !== undefined) combined.markers = props.markers;
-  if (props.polylines !== undefined) combined.polylines = props.polylines;
-  if (props.polygons !== undefined) combined.polygons = props.polygons;
-  if (props.circles !== undefined) combined.circles = props.circles;
-  engine.setOverlays(combined);
-}
+// Overlays Watchers - Granular independent watches to prevent cross-layer invalidation
+watch(
+  () => props.polygons,
+  (newPolygons) => {
+    if (!engine) return;
+    if (newPolygons !== undefined && typeof (engine as any).setPolygons === 'function') {
+      (engine as any).setPolygons(newPolygons);
+    }
+  },
+  { deep: true }
+);
+
+watch(
+  () => props.polylines,
+  (newPolylines) => {
+    if (!engine) return;
+    if (newPolylines !== undefined && typeof (engine as any).setPolylines === 'function') {
+      (engine as any).setPolylines(newPolylines);
+    }
+  },
+  { deep: true }
+);
+
+watch(
+  () => props.circles,
+  (newCircles) => {
+    if (!engine) return;
+    if (newCircles !== undefined && typeof (engine as any).setCircles === 'function') {
+      (engine as any).setCircles(newCircles);
+    }
+  },
+  { deep: true }
+);
+
+watch(
+  () => props.markers,
+  (newMarkers) => {
+    if (!engine) return;
+    if (newMarkers !== undefined && typeof (engine as any).setMarkers === 'function') {
+      (engine as any).setMarkers(newMarkers);
+    }
+  },
+  { deep: true }
+);
+
+watch(
+  [() => props.geojson, () => props.geojsonStyle],
+  ([newData, newStyle]) => {
+    if (!engine) return;
+    if (newData !== undefined && typeof (engine as any).setGeoJSON === 'function') {
+      (engine as any).setGeoJSON(newData, newStyle);
+    }
+  },
+  { deep: true }
+);
+
+watch(
+  () => props.overlays,
+  (newOverlays) => {
+    if (!engine || !newOverlays) return;
+    engine.setOverlays(newOverlays);
+  },
+  { deep: true }
+);
 
 watch(
   [
-    () => props.overlays,
-    () => props.markers,
-    () => props.polylines,
-    () => props.polygons,
-    () => props.circles,
+    () => props.enableCluster,
+    () => props.clusterRadius,
+    () => props.clusterMaxZoom,
+    () => props.clusterOptions,
   ],
   () => {
-    syncCombinedOverlays();
+    const opts = props.clusterOptions || {
+      enable: props.enableCluster,
+      clusterRadius: props.clusterRadius,
+      clusterMaxZoom: props.clusterMaxZoom,
+    };
+    if (engine && typeof (engine as any).setClusterOptions === 'function') {
+      (engine as any).setClusterOptions(opts);
+    }
   },
   { deep: true }
 );
@@ -441,6 +510,7 @@ function onOverlayClick(event: OverlayClickEvent) {
   if (event.type === 'polyline') emit('polyline-click', event.data as PolylineOptions);
   if (event.type === 'polygon') emit('polygon-click', event.data as PolygonOptions);
   if (event.type === 'circle') emit('circle-click', event.data as CircleOptions);
+  if (event.type === 'geojson') emit('geojson-click', event.data);
 }
 
 // Handler when renderjs is ready on App-Plus
@@ -457,6 +527,8 @@ onMounted(async () => {
   if (props.polylines) initialOverlays.polylines = props.polylines;
   if (props.polygons) initialOverlays.polygons = props.polygons;
   if (props.circles) initialOverlays.circles = props.circles;
+  if (props.geojson) initialOverlays.geojson = props.geojson;
+  if (props.geojsonStyle) initialOverlays.geojsonStyle = props.geojsonStyle;
 
   const commonOptions = {
     center: props.center,
@@ -467,6 +539,8 @@ onMounted(async () => {
     subdomains: props.subdomains,
     layers: props.layers,
     overlays: initialOverlays,
+    geojson: props.geojson,
+    geojsonStyle: props.geojsonStyle,
     showControls: props.showControls,
     onMove: onMapMove,
     onMoveEnd: onMapMoveEnd,
@@ -474,6 +548,12 @@ onMounted(async () => {
     onZoomEnd: onMapZoomEnd,
     onClick: onMapClick,
     onOverlayClick: onOverlayClick,
+    clusterOptions: props.clusterOptions || {
+      enable: props.enableCluster,
+      clusterRadius: props.clusterRadius,
+      clusterMaxZoom: props.clusterMaxZoom,
+    },
+    onClusterClick: (cluster: ClusterGroup) => emit('cluster-click', cluster),
   };
 
   // #ifdef H5
@@ -544,6 +624,102 @@ onUnmounted(() => {
 });
 
 
+function resolveTargetBounds(target: any) {
+  if (target === 'markers' || target === 'points') {
+    return props.markers || props.overlays?.markers || [];
+  }
+  if (target === 'polylines' || target === 'lines') {
+    return props.polylines || props.overlays?.polylines || [];
+  }
+  if (target === 'polygons') {
+    return props.polygons || props.overlays?.polygons || [];
+  }
+  if (target === 'circles') {
+    return props.circles || props.overlays?.circles || [];
+  }
+  if (target === 'geojson') {
+    return props.geojson || props.overlays?.geojson || [];
+  }
+  if (!target || target === 'all' || target === 'active') {
+    return {
+      markers: props.markers || props.overlays?.markers,
+      polylines: props.polylines || props.overlays?.polylines,
+      polygons: props.polygons || props.overlays?.polygons,
+      circles: props.circles || props.overlays?.circles,
+      geojson: props.geojson || props.overlays?.geojson,
+    };
+  }
+  return target;
+}
+
+function fitBounds(
+  bounds?: LatLngBoundsExpression | LatLngTuple[] | MapBounds | 'markers' | 'polylines' | 'polygons' | 'all' | 'points' | 'lines',
+  options?: { padding?: [number, number]; maxZoom?: number; animate?: boolean; duration?: number }
+) {
+  const resolved = resolveTargetBounds(bounds);
+  // #ifndef APP-PLUS
+  if (engine && typeof (engine as any).fitBounds === 'function') {
+    (engine as any).fitBounds(resolved, options);
+  }
+  // #endif
+
+  // #ifdef APP-PLUS
+  fitBoundsAction.value = {
+    bounds: resolved,
+    options,
+    timestamp: Date.now(),
+  };
+  // #endif
+}
+
+if (instance && instance.proxy) {
+  const proxy = instance.proxy as any;
+  proxy.doFitBounds = fitBounds;
+  proxy.fitBounds = fitBounds;
+  proxy.onRender_MapMove = (val: any) => {
+    const center = val?.center || val;
+    const zoom = val?.zoom;
+    if (center) {
+      emit('update:center', center);
+      emit('move', { center, zoom });
+    }
+  };
+  proxy.onRender_MapMoveEnd = (val: any) => {
+    const center = val?.center || val;
+    const zoom = val?.zoom;
+    if (center) {
+      emit('update:center', center);
+      emit('moveend', { center, zoom });
+    }
+  };
+  proxy.onRender_MapZoom = (z: any) => {
+    emit('update:zoom', z);
+    emit('zoom', z);
+  };
+  proxy.onRender_MapZoomEnd = (z: any) => {
+    emit('update:zoom', z);
+    emit('zoomend', z);
+  };
+  proxy.onRender_MapClick = (val: any) => {
+    const latLng = val?.latLng || val;
+    const point = val?.point || { x: 0, y: 0 };
+    emit('click', { latLng, point });
+  };
+  proxy.onRender_OverlayClick = (val: any) => {
+    emit('overlay-click', val);
+    if (val && val.type === 'marker') emit('marker-click', val.data);
+    if (val && val.type === 'polyline') emit('polyline-click', val.data);
+    if (val && val.type === 'polygon') emit('polygon-click', val.data);
+    if (val && val.type === 'circle') emit('circle-click', val.data);
+  };
+  proxy.onRender_ClusterClick = (val: any) => {
+    emit('cluster-click', val);
+  };
+  proxy.onRender_Ready = () => {
+    emit('ready', proxy);
+  };
+}
+
 // Unified Exposed methods
 defineExpose({
   setCenter(center: LatLngTuple, animate = true) {
@@ -560,6 +736,12 @@ defineExpose({
   },
   panTo(center: LatLngTuple, duration = 300) {
     engine?.panTo(center, duration);
+  },
+  fitBounds(
+    bounds: LatLngBoundsExpression | LatLngTuple[] | MapBounds,
+    options?: { padding?: [number, number]; maxZoom?: number; animate?: boolean; duration?: number }
+  ) {
+    fitBounds(bounds, options);
   },
   setTileUrl(url: string, subdomains?: string[]) {
     engine?.setTileUrl(url, subdomains);
@@ -582,8 +764,19 @@ defineExpose({
   setCircles(circles: CircleOptions[]) {
     engine?.setCircles(circles);
   },
+  setGeoJSON(data: any, style?: GeoJsonStyle) {
+    geojsonRevision.value++;
+    if (engine && typeof (engine as any).setGeoJSON === 'function') {
+      (engine as any).setGeoJSON(data, style);
+    }
+  },
   clearOverlays() {
     engine?.clearOverlays();
+  },
+  setClusterOptions(options: ClusterOptions) {
+    if (engine && typeof (engine as any).setClusterOptions === 'function') {
+      (engine as any).setClusterOptions(options);
+    }
   },
   resize(width?: number, height?: number) {
     engine?.resize(width, height);
@@ -745,8 +938,183 @@ defineExpose({
 .uni-custom-html-icon,
 .uni-custom-img-icon,
 .uni-custom-icon,
-.uni-default-pin {
+.uni-default-pin,
+.uni-cluster-marker-icon,
+.uni-avatar-marker-icon {
   background: transparent !important;
   border: none !important;
+}
+
+.uni-cluster-bubble {
+  position: relative !important;
+  width: 44px !important;
+  height: 44px !important;
+  border-radius: 50% !important;
+  background: #ffffff !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22), 0 0 0 3px #3b82f6 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  box-sizing: border-box !important;
+  transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+
+.uni-cluster-bubble:hover {
+  transform: scale(1.1) !important;
+}
+
+.uni-cluster-bubble .uni-cluster-icon {
+  width: 26px !important;
+  height: 26px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 50% !important;
+  overflow: hidden !important;
+}
+
+.uni-cluster-bubble .uni-cluster-badge {
+  position: absolute !important;
+  top: -6px !important;
+  right: -8px !important;
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
+  color: #ffffff !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  padding: 0 5px !important;
+  border-radius: 10px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border: 2px solid #ffffff !important;
+  box-shadow: 0 2px 6px rgba(220, 38, 38, 0.45) !important;
+  box-sizing: border-box !important;
+  white-space: nowrap !important;
+  pointer-events: none !important;
+}
+
+/* Flowing polyline animation */
+@keyframes uni-polyline-flowing {
+  from {
+    stroke-dashoffset: 40px;
+  }
+  to {
+    stroke-dashoffset: 0px;
+  }
+}
+
+.uni-flowing-polyline {
+  animation: uni-polyline-flowing 1.5s linear infinite;
+}
+
+/* Avatar Bubble Marker Styles */
+.uni-avatar-marker-wrapper {
+  position: relative !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  cursor: pointer !important;
+  user-select: none !important;
+}
+
+.uni-avatar-bubble {
+  position: relative !important;
+  border-radius: 50% !important;
+  background-color: #ffffff !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-sizing: border-box !important;
+  overflow: visible !important;
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+}
+
+.uni-avatar-marker-wrapper:hover .uni-avatar-bubble {
+  transform: scale(1.12) !important;
+}
+
+.uni-avatar-img {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 50% !important;
+  object-fit: cover !important;
+  display: block !important;
+  pointer-events: none !important;
+}
+
+.uni-avatar-arrow {
+  position: absolute !important;
+  bottom: -6px !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  width: 0 !important;
+  height: 0 !important;
+  border-left: 5px solid transparent !important;
+  border-right: 5px solid transparent !important;
+  border-top-width: 6px !important;
+  border-top-style: solid !important;
+  z-index: 1 !important;
+  filter: drop-shadow(0 2px 2px rgba(0, 0, 0, 0.2)) !important;
+}
+
+.uni-avatar-badge {
+  position: absolute !important;
+  top: -2px !important;
+  right: -2px !important;
+  background: #ffffff !important;
+  color: #1e293b !important;
+  font-size: 8px !important;
+  font-weight: 700 !important;
+  line-height: 1 !important;
+  height: 12px !important;
+  min-width: 12px !important;
+  padding: 0 2px !important;
+  border-radius: 6px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25) !important;
+  box-sizing: border-box !important;
+  white-space: nowrap !important;
+  z-index: 10 !important;
+  pointer-events: none !important;
+}
+
+@keyframes uni-avatar-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  70% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+.uni-avatar-pulse {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 50% !important;
+  box-sizing: border-box !important;
+  border-style: solid !important;
+  border-width: 3px !important;
+  animation: uni-avatar-pulse 1.8s cubic-bezier(0.24, 0, 0.38, 1) infinite !important;
+  pointer-events: none !important;
+  z-index: 0 !important;
 }
 </style>

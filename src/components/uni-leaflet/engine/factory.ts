@@ -5,6 +5,9 @@ import type {
   TileLayerConfig,
   MapOverlays,
   OverlayClickEvent,
+  ClusterOptions,
+  ClusterGroup,
+  GeoJsonStyle,
 } from '../types';
 
 // #ifdef H5
@@ -24,6 +27,8 @@ export interface CreateEngineOptions {
   subdomains: string[];
   layers?: Array<string | TileLayerConfig>;
   overlays?: MapOverlays;
+  geojson?: any;
+  geojsonStyle?: GeoJsonStyle;
   showControls?: boolean;
   onMove: (center: LatLngTuple, zoom: number) => void;
   onMoveEnd: (center: LatLngTuple, zoom: number) => void;
@@ -31,6 +36,8 @@ export interface CreateEngineOptions {
   onZoomEnd: (zoom: number) => void;
   onClick: (latLng: LatLngTuple, point: Point) => void;
   onOverlayClick?: (event: OverlayClickEvent) => void;
+  onClusterClick?: (cluster: ClusterGroup) => void;
+  clusterOptions?: ClusterOptions;
 
   // H5 container
   container?: HTMLElement | null;
@@ -64,12 +71,16 @@ export async function createMapEngine(
     subdomains: options.subdomains,
     layers: options.layers,
     overlays: options.overlays,
+    geojson: options.geojson,
+    geojsonStyle: options.geojsonStyle,
     onMove: options.onMove,
     onMoveEnd: options.onMoveEnd,
     onZoom: options.onZoom,
     onZoomEnd: options.onZoomEnd,
     onClick: options.onClick,
     onOverlayClick: options.onOverlayClick,
+    onClusterClick: options.onClusterClick,
+    clusterOptions: options.clusterOptions,
   });
   return adapter;
   // #endif
@@ -89,6 +100,8 @@ export async function createMapEngine(
     subdomains: options.subdomains,
     layers: options.layers,
     overlays: options.overlays,
+    geojson: options.geojson,
+    geojsonStyle: options.geojsonStyle,
     showControls: options.showControls,
     onMove: options.onMove,
     onMoveEnd: options.onMoveEnd,
@@ -96,6 +109,8 @@ export async function createMapEngine(
     onZoomEnd: options.onZoomEnd,
     onClick: options.onClick,
     onOverlayClick: options.onOverlayClick,
+    onClusterClick: options.onClusterClick,
+    clusterOptions: options.clusterOptions,
   });
   // #endif
 }

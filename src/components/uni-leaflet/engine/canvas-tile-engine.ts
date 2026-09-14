@@ -10,10 +10,25 @@ import type {
   MapOverlays,
   OverlayClickEvent,
   MarkerLabelOptions,
+  FitBoundsOptions,
+  LatLngBoundsExpression,
+  MapBounds,
+  ClusterOptions,
+  ClusterGroup,
+  GeoJsonStyle,
+  GeoJsonStyleOptions,
 } from '../types';
 import { clamp, latLngToWorldPixel, worldPixelToLatLng } from '../utils/crs';
 import { getVisibleTiles } from '../utils/tile';
+import { getBoundsCenterAndZoom } from '../utils/bounds';
+import { clusterMarkers } from '../utils/cluster';
+import {
+  normalizeGeoJsonFeatures,
+  resolveGeoJsonStyle,
+  isPointInPolygon2D,
+} from '../utils/geojson';
 import { TileManager } from './tile-manager';
+import { generateCurvedPolyline } from '../utils/curve';
 
 export interface CanvasEngineOptions {
   canvas: any;
@@ -29,6 +44,8 @@ export interface CanvasEngineOptions {
   subdomains?: string[];
   layers?: Array<string | TileLayerConfig>;
   overlays?: MapOverlays;
+  geojson?: any;
+  geojsonStyle?: GeoJsonStyle;
   tileSize?: number;
   showControls?: boolean;
   onMove?: (center: LatLngTuple, zoom: number) => void;
@@ -37,6 +54,8 @@ export interface CanvasEngineOptions {
   onZoomEnd?: (zoom: number) => void;
   onClick?: (latLng: LatLngTuple, point: Point) => void;
   onOverlayClick?: (event: OverlayClickEvent) => void;
+  onClusterClick?: (cluster: ClusterGroup) => void;
+  clusterOptions?: ClusterOptions;
 }
 
 export class CanvasTileEngine implements IMapEngine {
@@ -56,11 +75,25 @@ export class CanvasTileEngine implements IMapEngine {
   private subdomains: string[];
   private layers: TileLayerConfig[] = [];
   private overlays: MapOverlays = {};
+  private geojson: any = null;
+  private geojsonStyle?: GeoJsonStyle;
   private showControls: boolean;
+
+  private clusterOptions: ClusterOptions = {
+    enable: false,
+    clusterRadius: 60,
+    clusterMaxZoom: 17,
+  };
+  private currentClusters: ClusterGroup[] = [];
 
   private tileManager: TileManager;
   private isRendering = false;
   private animFrameId: any = null;
+
+  // Flow animation state
+  private flowAnimationOffset = 0;
+  private flowAnimFrameId: any = null;
+  private isFlowAnimating = false;
 
   // Touch tracking
   private isTouching = false;
@@ -87,6 +120,7 @@ export class CanvasTileEngine implements IMapEngine {
   public onZoomEnd?: (zoom: number) => void;
   public onClick?: (latLng: LatLngTuple, point: Point) => void;
   public onOverlayClick?: (event: OverlayClickEvent) => void;
+  public onClusterClick?: (cluster: ClusterGroup) => void;
 
   constructor(options: CanvasEngineOptions) {
     this.canvas = options.canvas;
@@ -103,11 +137,17 @@ export class CanvasTileEngine implements IMapEngine {
     this.showControls =
       options.showControls !== undefined ? options.showControls : true;
 
+    if (options.clusterOptions) {
+      this.clusterOptions = { ...this.clusterOptions, ...options.clusterOptions };
+    }
+
     this.tileUrl =
       options.tileUrl || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
     this.subdomains = options.subdomains || ['a', 'b', 'c'];
     this.layers = this.normalizeLayers(options.layers);
     this.overlays = options.overlays || {};
+    this.geojson = options.geojson || options.overlays?.geojson || null;
+    this.geojsonStyle = options.geojsonStyle || options.overlays?.geojsonStyle;
 
     this.onMove = options.onMove;
     this.onMoveEnd = options.onMoveEnd;
@@ -115,6 +155,7 @@ export class CanvasTileEngine implements IMapEngine {
     this.onZoomEnd = options.onZoomEnd;
     this.onClick = options.onClick;
     this.onOverlayClick = options.onOverlayClick;
+    this.onClusterClick = options.onClusterClick;
 
     this.tileManager = new TileManager();
     this.tileManager.setCanvasNode(this.canvas);
@@ -124,6 +165,7 @@ export class CanvasTileEngine implements IMapEngine {
 
     this.initCanvasDpr();
     this.requestRender();
+    this.checkFlowAnimationState();
   }
 
   private normalizeLayers(
@@ -233,6 +275,81 @@ export class CanvasTileEngine implements IMapEngine {
     animate();
   }
 
+  public fitBounds(
+    bounds: LatLngBoundsExpression | LatLngTuple[] | MapBounds,
+    options?: FitBoundsOptions
+  ) {
+    const result = getBoundsCenterAndZoom(bounds, this.width, this.height, {
+      padding: options?.padding,
+      minZoom: this.minZoom,
+      maxZoom: options?.maxZoom ?? this.maxZoom,
+      tileSize: this.tileSize,
+    });
+
+    if (!result) return;
+
+    const { center: targetCenter, zoom: targetZoom } = result;
+    const animate = options?.animate !== false;
+    const duration = options?.duration ?? 300;
+
+    if (this.animFrameId) {
+      if (typeof cancelAnimationFrame !== 'undefined') {
+        cancelAnimationFrame(this.animFrameId);
+      } else {
+        clearTimeout(this.animFrameId);
+      }
+      this.animFrameId = null;
+    }
+
+    if (!animate || duration <= 0) {
+      this.center = [...targetCenter];
+      this.zoom = targetZoom;
+      this.requestRender();
+      this.onMove?.(this.center, this.zoom);
+      this.onZoom?.(this.zoom);
+      this.onMoveEnd?.(this.center, this.zoom);
+      this.onZoomEnd?.(this.zoom);
+      return;
+    }
+
+    const startCenter = [...this.center] as LatLngTuple;
+    const startZoom = this.zoom;
+    const startTime = Date.now();
+
+    const doAnimate = () => {
+      const elapsed = Date.now() - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      const ease = 1 - Math.pow(1 - progress, 3);
+
+      const lat = startCenter[0] + (targetCenter[0] - startCenter[0]) * ease;
+      const lng = startCenter[1] + (targetCenter[1] - startCenter[1]) * ease;
+      const currentZoom = startZoom + (targetZoom - startZoom) * ease;
+
+      this.center = [lat, lng];
+      this.zoom = currentZoom;
+      this.requestRender();
+      this.onMove?.(this.center, this.zoom);
+      this.onZoom?.(this.zoom);
+
+      if (progress < 1) {
+        if (typeof requestAnimationFrame !== 'undefined') {
+          this.animFrameId = requestAnimationFrame(doAnimate);
+        } else {
+          this.animFrameId = setTimeout(doAnimate, 16);
+        }
+      } else {
+        this.animFrameId = null;
+        this.center = [...targetCenter];
+        this.zoom = targetZoom;
+        this.requestRender();
+        this.onMoveEnd?.(this.center, this.zoom);
+        this.onZoomEnd?.(this.zoom);
+      }
+    };
+
+    doAnimate();
+  }
+
   public setTileUrl(url: string, subdomains?: string[]) {
     this.tileUrl = url;
     if (subdomains) this.subdomains = subdomains;
@@ -253,17 +370,34 @@ export class CanvasTileEngine implements IMapEngine {
 
   public setOverlays(overlays: MapOverlays) {
     this.overlays = { ...overlays };
+    if (overlays.geojson !== undefined) {
+      this.geojson = overlays.geojson;
+    }
+    if (overlays.geojsonStyle !== undefined) {
+      this.geojsonStyle = overlays.geojsonStyle;
+    }
+    this.requestRender();
+    this.checkFlowAnimationState();
+  }
+
+  public setGeoJSON(data: any, style?: GeoJsonStyle) {
+    this.geojson = data;
+    if (style !== undefined) {
+      this.geojsonStyle = style;
+    }
     this.requestRender();
   }
 
   public setMarkers(markers: MarkerOptions[]) {
     this.overlays.markers = markers;
     this.requestRender();
+    this.checkFlowAnimationState();
   }
 
   public setPolylines(polylines: PolylineOptions[]) {
     this.overlays.polylines = polylines;
     this.requestRender();
+    this.checkFlowAnimationState();
   }
 
   public setPolygons(polygons: PolygonOptions[]) {
@@ -278,6 +412,14 @@ export class CanvasTileEngine implements IMapEngine {
 
   public clearOverlays() {
     this.overlays = {};
+    this.currentClusters = [];
+    this.geojson = null;
+    this.stopFlowAnimation();
+    this.requestRender();
+  }
+
+  public setClusterOptions(options: ClusterOptions) {
+    this.clusterOptions = { ...this.clusterOptions, ...options };
     this.requestRender();
   }
 
@@ -398,9 +540,14 @@ export class CanvasTileEngine implements IMapEngine {
   }
 
   /**
-   * Render vector overlays (Polygons, Circles, Polylines, Markers, Labels)
+   * Render vector overlays (Polygons, Circles, Polylines, Markers, Labels, GeoJSON)
    */
   private renderOverlays(ctx: any) {
+    // 0. Render GeoJSON Vector Layer
+    if (this.geojson) {
+      this.drawGeoJSON(ctx, this.geojson, this.geojsonStyle);
+    }
+
     // A. Render Polygons
     if (this.overlays.polygons && Array.isArray(this.overlays.polygons)) {
       for (const poly of this.overlays.polygons) {
@@ -495,7 +642,11 @@ export class CanvasTileEngine implements IMapEngine {
         try {
           ctx.save();
           ctx.beginPath();
-          const points = line.latLngs.map((pt) =>
+          const effectiveLatLngs = line.curved
+            ? generateCurvedPolyline(line.latLngs, line.curvature ?? 0.2)
+            : line.latLngs;
+
+          const points = effectiveLatLngs.map((pt) =>
             this.latLngToScreenPoint(pt[0], pt[1])
           );
 
@@ -510,9 +661,27 @@ export class CanvasTileEngine implements IMapEngine {
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
 
-          if (line.dashArray && ctx.setLineDash) {
+          if (line.flowing) {
+            const dash =
+              line.dashArray && line.dashArray.length > 0
+                ? line.dashArray
+                : [10, 10];
+            if (ctx.setLineDash) {
+              try {
+                ctx.setLineDash(dash);
+              } catch (e) {}
+            }
+            const speed = line.flowSpeed ?? 1;
+            const offset = (this.flowAnimationOffset * speed) % 40;
+            if ('lineDashOffset' in ctx) {
+              ctx.lineDashOffset = -offset;
+            }
+          } else if (line.dashArray && ctx.setLineDash) {
             try {
               ctx.setLineDash(line.dashArray);
+              if (line.dashOffset !== undefined && 'lineDashOffset' in ctx) {
+                ctx.lineDashOffset = line.dashOffset;
+              }
             } catch (e) {}
           }
 
@@ -521,6 +690,9 @@ export class CanvasTileEngine implements IMapEngine {
           if (ctx.setLineDash) {
             try {
               ctx.setLineDash([]);
+              if ('lineDashOffset' in ctx) {
+                ctx.lineDashOffset = 0;
+              }
             } catch (e) {}
           }
           ctx.restore();
@@ -543,87 +715,24 @@ export class CanvasTileEngine implements IMapEngine {
 
     // D. Render Markers & Pins
     if (this.overlays.markers && Array.isArray(this.overlays.markers)) {
-      for (const m of this.overlays.markers) {
-        if (!m || !m.latLng) continue;
-
-        try {
-          const pt = this.latLngToScreenPoint(m.latLng[0], m.latLng[1]);
-          const size = m.icon?.size || [32, 32];
-          const anchor = m.icon?.anchor || [size[0] / 2, size[1]];
-
-          ctx.save();
-
-          if (m.icon?.svg) {
-            // Raw SVG string markup
-            let svgStr = m.icon.svg.trim();
-            if (!svgStr.includes('xmlns=')) {
-              svgStr = svgStr.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
-            }
-            const svgDataUri = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgStr)}`;
-            const img = this.getOrLoadIcon(svgDataUri);
-            if (img) {
-              ctx.drawImage(img, pt.x - anchor[0], pt.y - anchor[1], size[0], size[1]);
-            } else {
-              this.drawPinFallback(ctx, pt, m.icon?.color || '#ef4444', size, anchor);
-            }
-          } else if (m.icon?.url) {
-            // PNG / JPG / WebP / SVG Image URL or Data URI
-            const img = this.getOrLoadIcon(m.icon.url);
-            if (img) {
-              ctx.drawImage(img, pt.x - anchor[0], pt.y - anchor[1], size[0], size[1]);
-            } else {
-              this.drawPinFallback(ctx, pt, m.icon?.color || '#3b82f6', size, anchor);
-            }
-          } else if (m.icon?.text) {
-            // Emoji / Character Icon
-            const fontSize = Math.round(size[0] * 0.72);
-            ctx.font = `${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(m.icon.text, pt.x - anchor[0] + size[0] / 2, pt.y - anchor[1] + size[1] / 2);
+      this.currentClusters = [];
+      if (!this.clusterOptions.enable) {
+        for (const m of this.overlays.markers) {
+          this.drawSingleMarker(ctx, m);
+        }
+      } else {
+        const results = clusterMarkers(
+          this.overlays.markers,
+          this.zoom,
+          this.clusterOptions
+        );
+        for (const item of results) {
+          if (!item.isCluster) {
+            this.drawSingleMarker(ctx, item.marker);
           } else {
-            // Sleek Vector Pin
-            this.drawPinFallback(ctx, pt, m.icon?.color || '#ef4444', size, anchor);
+            this.currentClusters.push(item.cluster);
+            this.drawClusterMarker(ctx, item.cluster);
           }
-
-          ctx.restore();
-
-          // Marker Label badge on top of pin / icon (Speech bubble with bottom arrow pointing tightly at icon top)
-          if (m.label) {
-            const labelText =
-              typeof m.label === 'string' ? m.label : m.label.text;
-            const labelStyle =
-              typeof m.label === 'object' ? m.label : undefined;
-
-            // Accurate visual top edge and horizontal center of the icon
-            const iconTopY = pt.y - anchor[1];
-            const iconCenterX = pt.x - anchor[0] + size[0] / 2;
-
-            // Tip sits 1px above the top-center of the icon
-            let tipX = iconCenterX;
-            let tipY = iconTopY - 1;
-
-            if (labelStyle?.offset) {
-              const offX = labelStyle.offset[0] || 0;
-              const offY = labelStyle.offset[1] || 0;
-              tipX += offX;
-              // Allow fine-tuning offset within ±10px, ignoring excessive legacy displacement numbers
-              if (Math.abs(offY) <= 10) {
-                tipY += offY;
-              }
-            }
-
-            this.drawLabelBadge(
-              ctx,
-              labelText,
-              tipX,
-              tipY,
-              labelStyle,
-              true
-            );
-          }
-        } catch (err) {
-          console.error('Error drawing marker:', err);
         }
       }
     }
@@ -632,6 +741,398 @@ export class CanvasTileEngine implements IMapEngine {
     if (this.showControls) {
       this.drawZoomControls(ctx);
     }
+  }
+
+  private drawGeoJSON(ctx: any, geojson: any, style?: GeoJsonStyle) {
+    if (!geojson) return;
+    const features = normalizeGeoJsonFeatures(geojson);
+
+    for (const feat of features) {
+      if (!feat.geometry) continue;
+      const s = resolveGeoJsonStyle(style, feat, '#3b82f6');
+      const gType = feat.geometry.type;
+      const coords = feat.geometry.coordinates;
+
+      if (gType === 'Polygon' || gType === 'MultiPolygon') {
+        const polys = gType === 'Polygon' ? [coords] : coords;
+        for (const poly of polys) {
+          if (!poly || poly.length === 0) continue;
+          ctx.save();
+          ctx.beginPath();
+          const extRing = poly[0];
+          if (!extRing || extRing.length === 0) continue;
+          const firstPt = this.latLngToScreenPoint(extRing[0][1], extRing[0][0]);
+          ctx.moveTo(firstPt.x, firstPt.y);
+          for (let i = 1; i < extRing.length; i++) {
+            const pt = this.latLngToScreenPoint(extRing[i][1], extRing[i][0]);
+            ctx.lineTo(pt.x, pt.y);
+          }
+          ctx.closePath();
+
+          ctx.fillStyle = s.fillColor;
+          ctx.globalAlpha = s.fillOpacity ?? 0.25;
+          ctx.fill();
+
+          ctx.globalAlpha = s.opacity ?? 1;
+          ctx.strokeStyle = s.color;
+          ctx.lineWidth = s.weight ?? 2;
+          if (s.dashArray && typeof ctx.setLineDash === 'function') {
+            ctx.setLineDash(s.dashArray);
+          }
+          ctx.stroke();
+          ctx.restore();
+        }
+      } else if (gType === 'LineString' || gType === 'MultiLineString') {
+        const lines = gType === 'LineString' ? [coords] : coords;
+        for (const line of lines) {
+          if (!line || line.length < 2) continue;
+          ctx.save();
+          ctx.beginPath();
+          const firstPt = this.latLngToScreenPoint(line[0][1], line[0][0]);
+          ctx.moveTo(firstPt.x, firstPt.y);
+          for (let i = 1; i < line.length; i++) {
+            const pt = this.latLngToScreenPoint(line[i][1], line[i][0]);
+            ctx.lineTo(pt.x, pt.y);
+          }
+          ctx.strokeStyle = s.color;
+          ctx.lineWidth = s.weight ?? 2;
+          ctx.globalAlpha = s.opacity ?? 1;
+          if (s.dashArray && typeof ctx.setLineDash === 'function') {
+            ctx.setLineDash(s.dashArray);
+          }
+          ctx.stroke();
+          ctx.restore();
+        }
+      } else if (gType === 'Point') {
+        const pt = this.latLngToScreenPoint(coords[1], coords[0]);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 6, 0, Math.PI * 2);
+        ctx.fillStyle = s.fillColor;
+        ctx.fill();
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = s.weight ?? 2;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
+  private drawSingleMarker(ctx: any, m: MarkerOptions) {
+    if (!m || !m.latLng) return;
+    try {
+      const pt = this.latLngToScreenPoint(m.latLng[0], m.latLng[1]);
+      const size = m.icon?.size || [32, 32];
+      const anchor = m.icon?.anchor || [size[0] / 2, size[1]];
+
+      ctx.save();
+
+      if (m.icon?.type === 'avatar') {
+        const avatarSize = m.icon.size || size || [32, 32];
+        const avatarW = avatarSize[0];
+        const avatarH = avatarSize[1];
+        const arrowW = avatarW <= 36 ? 4 : 5;
+        const arrowH = avatarW <= 36 ? 5 : 6;
+        const anchor = m.icon.anchor || [avatarW / 2, avatarH + arrowH];
+        const borderColor = m.icon.borderColor || '#3b82f6';
+        const borderWidth = m.icon.borderWidth ?? (avatarW <= 36 ? 2.5 : 3);
+        const pulseColor = m.icon.pulseColor || borderColor;
+        const radius = Math.min(avatarW, avatarH) / 2;
+        const centerX = pt.x - anchor[0] + avatarW / 2;
+        const centerY = pt.y - anchor[1] + avatarH / 2;
+
+        // 1. Draw pulse ripple halo if pulse enabled
+        if (m.icon.pulse) {
+          const pulsePhase = (Date.now() % 1800) / 1800;
+          const pulseRadius = radius + pulsePhase * (radius * 0.6);
+          const pulseAlpha = (1 - pulsePhase) * 0.8;
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(centerX, centerY, pulseRadius, 0, Math.PI * 2);
+          ctx.strokeStyle = pulseColor;
+          ctx.lineWidth = borderWidth;
+          ctx.globalAlpha = pulseAlpha;
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // 2. Draw white background circle & drop shadow
+        ctx.save();
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
+        ctx.shadowBlur = 8;
+        ctx.shadowOffsetY = 3;
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.restore();
+
+        // 3. Draw bottom pointer arrow
+        ctx.save();
+        ctx.beginPath();
+        const arrowTopY = centerY + radius - 1;
+        const arrowBottomY = centerY + radius + arrowH;
+        ctx.moveTo(centerX - arrowW, arrowTopY);
+        ctx.lineTo(centerX + arrowW, arrowTopY);
+        ctx.lineTo(centerX, arrowBottomY);
+        ctx.closePath();
+        ctx.fillStyle = borderColor;
+        ctx.fill();
+        ctx.restore();
+
+        // 4. Draw avatar image with circular clipping
+        if (m.icon.url) {
+          const img = this.getOrLoadIcon(m.icon.url);
+          if (img) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(
+              centerX,
+              centerY,
+              Math.max(1, radius - borderWidth / 2),
+              0,
+              Math.PI * 2
+            );
+            ctx.clip();
+            ctx.drawImage(
+              img,
+              centerX - radius,
+              centerY - radius,
+              radius * 2,
+              radius * 2
+            );
+            ctx.restore();
+          }
+        }
+
+        // 5. Draw border circle
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = borderWidth;
+        ctx.stroke();
+        ctx.restore();
+
+        // 6. Draw badge on top right
+        if (m.icon.badgeText) {
+          const isSmall = avatarW <= 36;
+          const badgeRadius = isSmall ? 6 : Math.max(7, Math.round(radius * 0.35));
+          const badgeFontSize = isSmall ? 8 : Math.max(9, Math.round(badgeRadius * 1.1));
+          const badgeX = centerX + radius * 0.72;
+          const badgeY = centerY - radius * 0.72;
+
+          ctx.save();
+          ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
+          ctx.shadowBlur = 3;
+          ctx.shadowOffsetY = 1;
+
+          ctx.beginPath();
+          ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI * 2);
+          ctx.fillStyle = m.icon.badgeColor || '#ffffff';
+          ctx.fill();
+
+          ctx.strokeStyle = m.icon.badgeColor ? '#ffffff' : 'rgba(0, 0, 0, 0.1)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          ctx.restore();
+
+          ctx.save();
+          ctx.fillStyle = m.icon.badgeColor ? '#ffffff' : '#1e293b';
+          ctx.font =
+            `bold ${badgeFontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(m.icon.badgeText, badgeX, badgeY);
+          ctx.restore();
+        }
+      } else if (m.icon?.svg) {
+        let svgStr = m.icon.svg.trim();
+        if (!svgStr.includes('xmlns=')) {
+          svgStr = svgStr.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+        }
+        const svgDataUri = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgStr)}`;
+        const img = this.getOrLoadIcon(svgDataUri);
+        if (img) {
+          ctx.drawImage(img, pt.x - anchor[0], pt.y - anchor[1], size[0], size[1]);
+        } else {
+          this.drawPinFallback(ctx, pt, m.icon?.color || '#ef4444', size, anchor);
+        }
+      } else if (m.icon?.url) {
+        const img = this.getOrLoadIcon(m.icon.url);
+        if (img) {
+          ctx.drawImage(img, pt.x - anchor[0], pt.y - anchor[1], size[0], size[1]);
+        } else {
+          this.drawPinFallback(ctx, pt, m.icon?.color || '#3b82f6', size, anchor);
+        }
+      } else if (m.icon?.text) {
+        const fontSize = Math.round(size[0] * 0.72);
+        ctx.font = `${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(m.icon.text, pt.x - anchor[0] + size[0] / 2, pt.y - anchor[1] + size[1] / 2);
+      } else {
+        this.drawPinFallback(ctx, pt, m.icon?.color || '#ef4444', size, anchor);
+      }
+
+      ctx.restore();
+
+      if (m.label) {
+        const labelText =
+          typeof m.label === 'string' ? m.label : m.label.text;
+        const labelStyle =
+          typeof m.label === 'object' ? m.label : undefined;
+
+        const iconTopY = pt.y - anchor[1];
+        const iconCenterX = pt.x - anchor[0] + size[0] / 2;
+
+        let tipX = iconCenterX;
+        let tipY = iconTopY - 1;
+
+        if (labelStyle?.offset) {
+          const offX = labelStyle.offset[0] || 0;
+          const offY = labelStyle.offset[1] || 0;
+          tipX += offX;
+          if (Math.abs(offY) <= 10) {
+            tipY += offY;
+          }
+        }
+
+        this.drawLabelBadge(
+          ctx,
+          labelText,
+          tipX,
+          tipY,
+          labelStyle,
+          true
+        );
+      }
+    } catch (err) {
+      console.error('Error drawing marker:', err);
+    }
+  }
+
+  private drawClusterMarker(ctx: any, cluster: ClusterGroup) {
+    const pt = this.latLngToScreenPoint(cluster.center[0], cluster.center[1]);
+    const radius = 22;
+    ctx.save();
+
+    // 1. Drop shadow
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
+    ctx.shadowBlur = 10;
+    ctx.shadowOffsetY = 3;
+
+    // 2. White Circle Background
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+
+    // 3. Blue Ring Border (3px)
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#3b82f6';
+    ctx.stroke();
+
+    // 4. Center Icon or Rep Marker
+    const rep = cluster.representativeMarker;
+    if (rep?.icon?.text) {
+      ctx.font = 'bold 18px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(rep.icon.text, pt.x, pt.y + 1);
+    } else if (rep?.icon?.url) {
+      const img = this.getOrLoadIcon(rep.icon.url);
+      if (img) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 14, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(img, pt.x - 14, pt.y - 14, 28, 28);
+        ctx.restore();
+      } else {
+        this.drawDefaultClusterIcon(ctx, pt.x, pt.y);
+      }
+    } else {
+      this.drawDefaultClusterIcon(ctx, pt.x, pt.y);
+    }
+
+    // 5. Top-Right Red Badge with +count
+    const badgeText = `+${cluster.count}`;
+    const badgeHeight = 18;
+    ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+    let textWidth = 14;
+    try {
+      if (ctx.measureText) {
+        const m = ctx.measureText(badgeText);
+        if (m && m.width > 0) textWidth = m.width;
+      }
+    } catch (e) {}
+    const badgeWidth = Math.max(18, textWidth + 10);
+    const badgeCenterX = pt.x + 14;
+    const badgeCenterY = pt.y - 14;
+    const badgeX = badgeCenterX - badgeWidth / 2;
+    const badgeY = badgeCenterY - badgeHeight / 2;
+    const r = badgeHeight / 2;
+
+    // Badge shadow
+    ctx.shadowColor = 'rgba(220, 38, 38, 0.45)';
+    ctx.shadowBlur = 6;
+    ctx.shadowOffsetY = 2;
+
+    // Badge pill
+    ctx.beginPath();
+    ctx.moveTo(badgeX + r, badgeY);
+    ctx.lineTo(badgeX + badgeWidth - r, badgeY);
+    ctx.arcTo(badgeX + badgeWidth, badgeY, badgeX + badgeWidth, badgeY + r, r);
+    ctx.lineTo(badgeX + badgeWidth, badgeY + badgeHeight - r);
+    ctx.arcTo(badgeX + badgeWidth, badgeY + badgeHeight, badgeX + badgeWidth - r, badgeY + badgeHeight, r);
+    ctx.lineTo(badgeX + r, badgeY + badgeHeight);
+    ctx.arcTo(badgeX, badgeY + badgeHeight, badgeX, badgeY + badgeHeight - r, r);
+    ctx.lineTo(badgeX, badgeY + r);
+    ctx.arcTo(badgeX, badgeY, badgeX + r, badgeY, r);
+    ctx.closePath();
+    ctx.fillStyle = '#ef4444';
+    ctx.fill();
+
+    // Badge white border
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Badge text
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(badgeText, badgeCenterX, badgeCenterY + 1);
+
+    ctx.restore();
+  }
+
+  private drawDefaultClusterIcon(ctx: any, cx: number, cy: number) {
+    ctx.beginPath();
+    ctx.arc(cx, cy - 2, 7, 0, Math.PI * 2);
+    ctx.fillStyle = '#3b82f6';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(cx, cy - 2, 3, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(cx - 5, cy);
+    ctx.lineTo(cx + 5, cy);
+    ctx.lineTo(cx, cy + 8);
+    ctx.closePath();
+    ctx.fillStyle = '#3b82f6';
+    ctx.fill();
   }
 
   /**
@@ -1022,12 +1523,38 @@ export class CanvasTileEngine implements IMapEngine {
       // Hit testing for overlays
       let hitOverlay = false;
 
-      // Check markers hit
-      if (this.overlays.markers) {
+      // 1. Check cluster bubble hit
+      if (this.clusterOptions.enable && this.currentClusters.length > 0) {
+        for (const cluster of this.currentClusters) {
+          const pt = this.latLngToScreenPoint(cluster.center[0], cluster.center[1]);
+          const dist = Math.hypot(pt.x - tapPos.x, pt.y - tapPos.y);
+          if (dist <= 26) {
+            hitOverlay = true;
+            const bounds = cluster.bounds;
+            const isSameCoord =
+              Math.abs(bounds[0][0] - bounds[1][0]) < 1e-6 &&
+              Math.abs(bounds[0][1] - bounds[1][1]) < 1e-6;
+            if (isSameCoord) {
+              this.center = cluster.center;
+              this.setZoom(Math.min(this.zoom + 2, this.maxZoom));
+            } else {
+              this.fitBounds(bounds, { padding: [60, 60] });
+            }
+            this.onClusterClick?.(cluster);
+            break;
+          }
+        }
+      }
+
+      // 2. Check markers hit
+      if (!hitOverlay && this.overlays.markers) {
         for (const m of this.overlays.markers) {
           const pt = this.latLngToScreenPoint(m.latLng[0], m.latLng[1]);
+          const isAvatar = m.icon?.type === 'avatar';
           const size = m.icon?.size || [32, 32];
-          const anchor = m.icon?.anchor || [size[0] / 2, size[1]];
+          const arrowH = isAvatar ? (size[0] <= 36 ? 5 : 6) : 0;
+          const anchor =
+            m.icon?.anchor || (isAvatar ? [size[0] / 2, size[1] + arrowH] : [size[0] / 2, size[1]]);
           const centerX = pt.x - anchor[0] + size[0] / 2;
           const centerY = pt.y - anchor[1] + size[1] / 2;
           const hitRadius = Math.max(20, Math.max(size[0], size[1]) / 2 + 4);
@@ -1035,6 +1562,39 @@ export class CanvasTileEngine implements IMapEngine {
             this.onOverlayClick?.({ type: 'marker', data: m });
             hitOverlay = true;
             break;
+          }
+        }
+      }
+
+      // 3. Check GeoJSON polygon features hit
+      if (!hitOverlay && this.geojson) {
+        const features = normalizeGeoJsonFeatures(this.geojson);
+        for (const feat of features) {
+          if (
+            feat.geometry &&
+            (feat.geometry.type === 'Polygon' || feat.geometry.type === 'MultiPolygon')
+          ) {
+            const polys =
+              feat.geometry.type === 'Polygon'
+                ? [feat.geometry.coordinates]
+                : feat.geometry.coordinates;
+            let matched = false;
+            for (const poly of polys) {
+              if (!poly || !poly[0]) continue;
+              const ring: [number, number][] = poly[0].map((coord: any) => {
+                const pt = this.latLngToScreenPoint(coord[1], coord[0]);
+                return [pt.x, pt.y] as [number, number];
+              });
+              if (isPointInPolygon2D([tapPos.x, tapPos.y], ring)) {
+                matched = true;
+                break;
+              }
+            }
+            if (matched) {
+              hitOverlay = true;
+              this.onOverlayClick?.({ type: 'geojson', data: feat });
+              break;
+            }
           }
         }
       }
@@ -1229,7 +1789,62 @@ export class CanvasTileEngine implements IMapEngine {
     return this.canvas;
   }
 
+  private checkFlowAnimationState() {
+    const hasFlowing = this.overlays.polylines?.some((line) => line.flowing);
+    const hasPulse = this.overlays.markers?.some(
+      (m) => m.icon?.type === 'avatar' && m.icon?.pulse
+    );
+    if (hasFlowing || hasPulse) {
+      this.startFlowAnimation();
+    } else {
+      this.stopFlowAnimation();
+    }
+  }
+
+  private startFlowAnimation() {
+    if (this.isFlowAnimating) return;
+    this.isFlowAnimating = true;
+
+    let lastTime = 0;
+    const step = (time: number) => {
+      if (!this.isFlowAnimating) return;
+      if (!lastTime) lastTime = time;
+      const delta = (time - lastTime) / 1000;
+      lastTime = time;
+
+      // 20 pixels per second as base flow speed
+      this.flowAnimationOffset =
+        (this.flowAnimationOffset + delta * 20) % 10000;
+      this.requestRender();
+
+      if (typeof requestAnimationFrame !== 'undefined') {
+        this.flowAnimFrameId = requestAnimationFrame(step);
+      } else {
+        this.flowAnimFrameId = setTimeout(() => step(Date.now()), 16);
+      }
+    };
+
+    if (typeof requestAnimationFrame !== 'undefined') {
+      this.flowAnimFrameId = requestAnimationFrame(step);
+    } else {
+      this.flowAnimFrameId = setTimeout(() => step(Date.now()), 16);
+    }
+  }
+
+  private stopFlowAnimation() {
+    this.isFlowAnimating = false;
+    if (this.flowAnimFrameId) {
+      if (typeof cancelAnimationFrame !== 'undefined') {
+        cancelAnimationFrame(this.flowAnimFrameId);
+      } else {
+        clearTimeout(this.flowAnimFrameId);
+      }
+      this.flowAnimFrameId = null;
+    }
+  }
+
   public destroy() {
+    this.stopFlowAnimation();
     if (this.wheelEndTimeout) {
       clearTimeout(this.wheelEndTimeout);
       this.wheelEndTimeout = null;
